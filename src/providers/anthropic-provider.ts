@@ -22,10 +22,12 @@ export const anthropicProvider: ModelProvider = {
       messages: [{ role: 'user', content: userInput }],
       //Required by the API — generous ceiling for one-word answers
       max_tokens: 1000, // Raised from 300 so adaptive thinking doesn't starve the text block
-      // No temperature: Opus 5 and Sonnet 5 reject the parameter (400 error);
-      // Haiku is left at default for consistency across all three tiers.
-      // Repeatability is verified separately instead — see README's
-      // Repeatability section (same real audit run five times, same verdict).
+      // No temperature: the current Claude models reject the parameter
+      // outright (400 error), so it is not sent to any tier — Haiku, which
+      // would accept it, is left at its default for consistency with the
+      // other three. Repeatability is verified separately instead — see the
+      // README's Repeatability section (same real audit run five times, same
+      // verdict).
       //
       // Effort comes from the model catalog and is only sent where the model
       // accepts it. Spread rather than a literal so Haiku's request carries no

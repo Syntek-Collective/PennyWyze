@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { printReport } from '../../src/report.js'
 import type { ModelSummary } from '../../src/summarize.js'
+import { decideVerdict } from '../../src/verdict.js'
 
 const baseModel = (overrides: Partial<ModelSummary> = {}): ModelSummary => ({
   name: 'model',
@@ -37,7 +38,7 @@ describe('printReport', () => {
       baseModel({ name: 'expensive-and-passed', monthlyCost: 200, passed: true }),
     ]
 
-    printReport(models, 0.15, 50)
+    printReport(models, 0.15, 50, decideVerdict(models))
 
     const output = printedOutput()
     expect(output).toContain('Switch to mid-and-passed')
@@ -53,23 +54,40 @@ describe('printReport', () => {
       baseModel({ name: 'pricey-but-passed', monthlyCost: 50, passed: true }),
     ]
 
-    printReport(models, 0.15, 50)
+    printReport(models, 0.15, 50, decideVerdict(models))
 
     const output = printedOutput()
     expect(output).toContain('You are currently on the optimal pricing tier')
     expect(output).not.toContain('Switch to')
   })
 
-  it('reports no cheaper option when nothing passed, instead of naming a verdict', () => {
+  it('says nothing met the bar when nothing passed', () => {
+    // Not "you are on the optimal tier" — nothing worked, so there is no
+    // claim to make about which tier is optimal.
     const models = [
       baseModel({ name: 'opus', monthlyCost: 200, passed: false }),
       baseModel({ name: 'sonnet', monthlyCost: 80, passed: false }),
     ]
 
-    printReport(models, 0.15, 50)
+    printReport(models, 0.15, 50, decideVerdict(models))
+
+    const output = printedOutput()
+    expect(output).toContain('No model met your pass bar.')
+    expect(output).not.toContain('optimal pricing tier')
+    expect(output).not.toContain('Switch to')
+  })
+
+  it('says you are already on the optimal tier when something passed but nothing is cheaper', () => {
+    const models = [
+      baseModel({ name: 'cheap-but-failed', monthlyCost: 10, passed: false }),
+      baseModel({ name: 'pricey-but-passed', monthlyCost: 200, passed: true }),
+    ]
+
+    printReport(models, 0.15, 50, decideVerdict(models))
 
     const output = printedOutput()
     expect(output).toContain('No cheaper model meets quality criteria.')
+    expect(output).toContain('optimal pricing tier')
     expect(output).not.toContain('Switch to')
   })
 
@@ -80,7 +98,7 @@ describe('printReport', () => {
       baseModel({ name: 'cheapest', monthlyCost: 100, passed: true }),
     ]
 
-    printReport(models, 0.15, 50, 'what-we-run-today')
+    printReport(models, 0.15, 50, decideVerdict(models, 'what-we-run-today'))
 
     const output = printedOutput()
     // 300 - 100, not 900 - 100: the user never paid the 900.
@@ -93,7 +111,7 @@ describe('printReport', () => {
       baseModel({ name: 'pricier', monthlyCost: 900, passed: true }),
     ]
 
-    printReport(models, 0.15, 50, 'what-we-run-today')
+    printReport(models, 0.15, 50, decideVerdict(models, 'what-we-run-today'))
 
     const output = printedOutput()
     expect(output).toContain('You are currently on the optimal pricing tier')
@@ -106,7 +124,7 @@ describe('printReport', () => {
       baseModel({ name: 'clean-run', monthlyCost: 500, passed: true }),
     ]
 
-    printReport(models, 0.15, 50)
+    printReport(models, 0.15, 50, decideVerdict(models))
 
     const output = printedOutput()
     expect(output).toContain('3 calls did not complete')
@@ -114,13 +132,13 @@ describe('printReport', () => {
   })
 
   it('warns when the dataset is under 30 examples', () => {
-    printReport([baseModel()], 0.15, 20)
+    printReport([baseModel()], 0.15, 20, decideVerdict([baseModel()]))
 
     expect(printedOutput()).toContain('Small dataset: only 20 examples tested')
   })
 
   it('does not warn when the dataset is 30 or more examples', () => {
-    printReport([baseModel()], 0.15, 30)
+    printReport([baseModel()], 0.15, 30, decideVerdict([baseModel()]))
 
     expect(printedOutput()).not.toContain('Small dataset')
   })

@@ -178,13 +178,16 @@ describe('summarize with incomplete calls', () => {
 
 describe('calculateResultsCost', () => {
   it('prices each call against its own model', () => {
-    // haiku 100 in / 10 out = $0.00015; opus ($5/$25) same tokens = $0.00075
+    // Hand-computed, per the convention in these tests — recompute by hand
+    // if prices change, don't derive from the code under test.
+    // haiku  (100 x $1  + 10 x $5)  / 1e6 = $0.00015
+    // opus   (100 x $4  + 10 x $20) / 1e6 = $0.00060
     const total = calculateResultsCost([
       result({ modelId: HAIKU }),
       result({ modelId: OPUS }),
     ]);
 
-    expect(total).toBeCloseTo(0.0009, 10);
+    expect(total).toBeCloseTo(0.00075, 10);
   });
 
   it('skips results from a model it has no prices for, instead of crashing', () => {

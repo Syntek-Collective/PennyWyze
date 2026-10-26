@@ -2,6 +2,7 @@ import Table from 'cli-table3';
 import chalk from 'chalk';
 
 import type { ModelSummary } from './summarize.js';
+import type { Verdict } from './verdict.js';
 
 // Formatting lives here, not in summarize() — the summary carries counts,
 // this turns them into the "48/50 (stopped)" the table shows.
@@ -17,12 +18,11 @@ export const printReport = (
   auditCost: number,
   datasetSize: number,
   /**
-   * The model the user is paying for today, from --current. Savings are
-   * measured against it. Without it there is no way to know what the user
-   * actually runs, so the priciest tier audited stands in — which overstates
-   * savings for anyone not already on that tier.
+   * The decision, made upstream by decideVerdict. Passed in rather than
+   * computed here so the printed verdict and the saved run record are
+   * literally the same object.
    */
-  currentModelId?: string,
+  verdict: Verdict,
 ) => {
   console.log('\n' + chalk.bold.cyan('  PENNYWYZE AUDIT REPORT'))
 
@@ -96,27 +96,20 @@ export const printReport = (
     }
   }
 
-  // Only ever recommend a model that passed — a cheap wrong answer must never win
-  const passed = models.filter(model => model.passed)
-  const cheapest = passed.sort((a,b) => a.monthlyCost - b.monthlyCost)[0]
-
-  // The baseline savings are measured against. --current names what the user
-  // actually pays for today, which is the only honest comparison. Falling back
-  // to the priciest tier audited keeps the old behaviour, but it overstates
-  // savings for anyone not already on that tier — hence the note below.
-  const current = currentModelId
-    ? models.find(model => model.name === currentModelId)
-    : undefined
-  const baselineCost = current
-    ? current.monthlyCost
-    : Math.max(...models.map(m => m.monthlyCost))
-  const savings = cheapest ? baselineCost - cheapest.monthlyCost : 0
-
-  // Two ways there is nothing to switch to: nothing passed at all, or the
-  // cheapest passing model is not actually cheaper than the baseline, which
-  // nets zero or less. Both are legitimate outcomes, not errors — the user is
-  // already on the cheapest tier that meets their bar.
-  if (!cheapest || savings <= 0) {
+  // Two different findings, told apart by reason rather than both printed as
+  // "you're on the optimal tier" — which is false when nothing passed at all.
+  if (verdict.reason === 'nothing_passed') {
+    console.log(
+      chalk.bgRed.black.bold(' VERDICT ') +
+      ' ' +
+      chalk.bold('No model met your pass bar.')
+    )
+    console.log(
+      chalk.dim(
+        '  Review the misses above, or lower --pass-rate if the bar is stricter than you need.',
+      ),
+    )
+  } else if (verdict.recommended === null) {
     console.log(
       chalk.bgRed.black.bold(' VERDICT ') +
       ' ' +
@@ -124,12 +117,12 @@ export const printReport = (
     )
     console.log(chalk.dim('  You are currently on the optimal pricing tier.'))
   } else {
-    const against = current ? ` vs ${current.name}` : ''
+    const against = verdict.baselineIsAssumed ? '' : ` vs ${verdict.baseline}`
     console.log(
       chalk.bgGreen.black.bold(' VERDICT ') +
-      ` Switch to ${chalk.bold.cyan(cheapest.name)} - save ~$${savings.toFixed(2)}/mo${against}.`
+      ` Switch to ${chalk.bold.cyan(verdict.recommended)} - save ~$${verdict.savingsPerMonth.toFixed(2)}/mo${against}.`
     )
-    if (!current) {
+    if (verdict.baselineIsAssumed) {
       console.log(
         chalk.dim(
           '  Measured against the most expensive tier audited. Pass --current <model> for savings against what you pay today.',

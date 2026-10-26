@@ -11,7 +11,9 @@ cli.ts (parse + validate flags)
   → audit.ts (the loop) → progress.ts (draws the bar)
   → scorer (grade each answer)
   → summarize.ts (results → one row per model) → cost/calculator.ts (price it)
+  → verdict.ts (decide what to recommend)
   → report.ts (print the table and verdict)
+  → run-record/ (optionally write the whole run as JSON)
 ```
 
 Two boundaries are worth knowing before you move code across them:
@@ -55,12 +57,12 @@ One interface, `ModelProvider`, with one method: `run(modelId, systemPrompt, use
 
 ## `src/providers/anthropic-models.ts` — pricing and model IDs
 
-A single object mapping each tier (`opus`, `sonnet`, `haiku`) to its model id, display label, input/output price per million tokens, request timeout, and reasoning effort. This is the one place to edit when Anthropic changes pricing or model ids. The CLI derives its list of models to audit from this object, so the report's row order (opus, then sonnet, then haiku) comes from this object's own key order, nothing sorts it explicitly. `MODELS_BY_ID` is the same data keyed by api id, so per-call lookups don't rescan the object.
+A single object mapping each tier (`fable`, `opus`, `sonnet`, `haiku`) to its model id, display label, input/output price per million tokens, request timeout, and reasoning effort. This is the one place to edit when Anthropic changes pricing or model ids. The CLI derives its list of models to audit from this object, so the report's row order comes from this object's own key order, nothing sorts it explicitly — the entries are kept most-expensive-first so the table reads as a price ladder, and a test enforces that. `MODELS_BY_ID` is the same data keyed by api id, so per-call lookups don't rescan the object.
 
 Two fields carry decisions rather than facts:
 
-- **`effort`** caps how much a model deliberates. On Claude 5 models thinking is on by default and thinking tokens bill at the *output* rate, so without a cap the pricier tiers are charged for reasoning a one-word classification never needed — skewing the very comparison this tool exists to produce. It is `null` for Haiku 4.5, which rejects `output_config.effort` with a 400 and has no default thinking to cap.
-- **`timeoutMs`** is per model because a thinking tier and Haiku don't deserve the same ceiling. A single short client-level timeout made slow-but-fine answers look like network failures.
+- **`effort`** caps how much a model deliberates. On Claude 5 models thinking is on by default and thinking tokens bill at the *output* rate, so without a cap the pricier tiers are charged for reasoning a one-word classification never needed — skewing the very comparison this tool exists to produce. It is `null` for Haiku 4.5, which does not support the parameter at all and returns a 400, and which has no adaptive thinking to cap. Every other tier defaults to `medium` or `high` effort, so capping it to `low` is what makes a one-word classification cost comparable across tiers.
+- **`timeoutMs`** is per model because a thinking tier and Haiku don't deserve the same ceiling. A single short client-level timeout made slow-but-fine answers look like network failures. Fable gets the longest (5 minutes): a single request can run minutes on a hard input.
 
 ## `src/providers/fake-provider.ts` — the free stand-in
 
@@ -112,6 +114,32 @@ Returns numbers and booleans, never formatted strings, for two reasons: tests ca
 ## `src/cost/calculator.ts` — the pricing math
 
 One function, `costOfCall`, that turns token counts and per-token rates into a dollar amount. The divide by 1,000,000 exists because rates are quoted per million tokens; forgetting it is the classic bug here; the code still runs, every number is just silently wrong by a factor of a million.
+
+## `src/verdict.ts` — the decision
+
+Takes the model summaries and returns which model to recommend, what switching saves, and which model the savings were measured against. Returns the decision; prints nothing.
+
+It used to live inside `report.ts`, computed in the same breath as the sentence that announced it — so the decision existed only as text on screen, and the only way to test it was to capture `console.log` output and search it for the words "Switch to." Now the report and the saved run record both read the same verdict, which is also why they can't disagree about who won.
+
+`reason` is the field worth knowing: `cheaper_model_passes`, `nothing_passed`, or `already_optimal`. The last two print the same message to a user but are different findings, and a machine reading a saved run needs them apart.
+
+**Gotcha:** `baselineIsAssumed` is true whenever `--current` wasn't passed. The savings figure is still real, but it's measured against the most expensive tier audited rather than what the user pays — so anything displaying that number should say so.
+
+## `src/run-record/` — the machine-readable run
+
+What `--json-out` writes: one JSON file describing an entire audit. The terminal output answers "what should I do right now"; this answers "what exactly did we measure, and when."
+
+- **`schema.ts`** — a Zod schema, with the type derived from it, same as the dataset schema. Defined as a schema rather than a plain type because the *reader* is the real beneficiary: a baseline file on disk may be old, hand-edited, or written by a different version, and parsing it should fail loudly rather than silently produce undefined fields.
+- **`build.ts`** — assembles a record and validates it on the way out. Validating what we write looks redundant but keeps the schema honest: add a field to the builder and forget the schema, and this throws in development instead of producing files that readers reject later.
+- **`write.ts`** — writes it, creating the containing folder if needed. Only ever to the path the user named, same contract as `--capture-misses`.
+
+Three decisions in here that aren't obvious:
+
+- **The hashes cover what was measured, not the file bytes.** The prompt hash is of the sanitized prompt actually sent to the model, and the dataset hash is of the parsed examples. So reformatting a dataset's whitespace isn't a change, while editing an expected answer is. Their purpose is to let a reader tell "quality regressed" apart from "this baseline measured a different prompt, so comparing them is meaningless" — without that, a CI gate reports failures that aren't real, which is how a team ends up switching the check off.
+- **Misses are stored in full.** The report truncates inputs to 60 characters so its tree view doesn't wrap; a saved record that inherited that would be useless for diagnosing a miss a week later. **This makes the file more sensitive than it looks:** it contains the complete text of every question a model got wrong — real customer messages, for a support classifier — where `--capture-misses` stores only the answer and the expected label. These records are meant to be committed as CI baselines, so say so in any docs that recommend committing them, and don't commit one built from sensitive inputs.
+- **`schemaVersion` is checked, not just recorded.** Bump it whenever a change would break a reader of an older file.
+- **There is deliberately no `provider` field.** Considered and deferred: the model id already identifies its provider through the catalog, so a reader can derive it, and adding the field later as an *optional* one needs no `schemaVersion` bump and leaves existing records valid. Deciding its shape now — per model or per run, provider id or display name, and what to do with a model the catalog no longer knows — would be guesswork until a second provider exists. Add it with that work.
+- **The output path is validated before the audit, not at write time.** `--json-out` pointing at the prompt or the dataset is refused outright, because the record is written with a plain overwrite and the audit has already finished by then — the user would lose both the file and the run. An uncreatable folder is also caught up front, since discovering it afterwards means paying for every call a second time. Both live in `output-path.ts`.
 
 ## `src/report.ts` — the printed output
 
