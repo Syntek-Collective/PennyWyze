@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'fs';
 
-import { exactMatchScorer } from '../../src/scorers/exact-match-scorer.js';
+import { exactMatch } from '../../src/scorers/exact-match-scorer.js';
 
 // Real wrong answers captured from actual audit runs (via --capture-misses).
 // They guard the scorer's normalization — the quote, code-fence and trailing
@@ -24,7 +24,7 @@ describe('exactMatchScorer against real captured misses', () => {
 
   it('still scores every captured miss as a miss', async () => {
     for (const { answer, expected } of rows) {
-      const scored = await exactMatchScorer.score(answer, expected);
+      const scored = exactMatch(answer, expected);
       expect(scored, `expected a miss for ${JSON.stringify({ answer, expected })}`).toBe(false);
     }
   });

@@ -25,6 +25,7 @@ PennyWyze is that evaluation harness, already built. Point it at your real promp
 **What makes it different:**
 - Costs are measured from real API token counts, never estimated
 - Grading is strict on purpose — a correct answer wearing decoration passes, a right answer buried in a sentence doesn't
+- Free-form answers can be graded by an LLM judge, which explains every verdict — and every audit shows how often that judge agrees with your own hand grading
 - A tier that's mathematically already failed stops spending immediately, mid-run
 - Verdicts held identical across 5 consecutive real audits
 
@@ -34,6 +35,7 @@ PennyWyze is that evaluation harness, already built. Point it at your real promp
 - [See It Run](#see-it-run)
 - [Flags](#flags)
 - [How It Grades](#how-it-grades)
+- [Grading Free-Form Answers](#grading-free-form-answers)
 - [Repeatability](#repeatability)
 - [Troubleshooting](#troubleshooting)
 - [Contributing & Development](#contributing--development)
@@ -139,12 +141,44 @@ pennywyze audit --prompt prompt.md --dataset dataset.jsonl --pass-rate 90
 | `--capture-misses <filepath>` | no | off | append every wrong answer to this file, as grader fixtures |
 | `--current <model-id>` | no | — | the model you run today; savings are measured against it |
 | `--json-out <filepath>` | no | off | also write the full run to this file as JSON, for CI or later comparison. **Contains the full text of every missed question** — don't commit it if your inputs are sensitive |
+| `--grader <kind>` | no | `exact` | `exact`, or `judge` — exact match first, an LLM judge for the rest. See [Grading Free-Form Answers](#grading-free-form-answers) |
+| `--judge-model <model-id>` | no | `$PENNYWYZE_JUDGE_MODEL`, then `claude-opus-5-5` | the judge model; implies `--grader judge` |
+| `--calibration <filepath>` | no | off | your hand-labeled answers — measures how often the grader agrees with you, printed in the report |
+| `--min-agreement <percent>` | no | off | stop before the audit if grader agreement is below this, 1–100. Needs `--calibration` |
 | `--fake` | no | off | run the whole pipeline against a built-in stand-in, free and offline |
 | `--version` | — | — | print the installed version |
 
 ## How It Grades
 
 Both sides are cleaned first (quotes, casing, code fences, trailing punctuation stripped), then compared **exactly** — not "contains." A decorated correct answer passes; a wrong answer never does, and an answer buried in a sentence fails on purpose, because ignoring "respond with one word" is a real bug in production. The winner is always the *cheapest tier that passed* — never just the cheapest tier.
+
+## Grading Free-Form Answers
+
+Exact match is right for labels. For answers that can be correct in many wordings — a support reply, a summary, an explanation — use the LLM judge:
+
+```bash
+pennywyze audit --prompt prompt.md --dataset dataset.jsonl --grader judge --calibration labels.jsonl
+```
+
+- **Exact match still runs first.** The judge only sees answers exact match rejected, so a matching answer costs nothing extra and can't be talked into a fail.
+- **Every judged verdict comes with a rationale.** The judge returns structured output — `{ rationale, verdict }` — and the rationale prints under each miss.
+- **The judge model is picked at run time:** `--judge-model`, then `PENNYWYZE_JUDGE_MODEL`, then `claude-opus-5-5`. On real runs it's confirmed with the Anthropic Models API before any paid call. Judge calls count toward the audit cost, never toward a model's monthly projection.
+- **You see how far to trust it.** `--calibration` takes answers you graded by hand:
+
+  ```jsonl
+  {"input": "Can I return a gift card?", "answer": "Gift cards are non-returnable.", "expected": "No — gift cards cannot be returned.", "label": "pass"}
+  {"input": "Can I return a gift card?", "answer": "Yes, within 30 days.", "expected": "No — gift cards cannot be returned.", "label": "fail"}
+  ```
+
+  The grader runs over them first, exactly as the audit will use it, and the report prints its agreement rate, false passes and false fails before the verdict. Without `--calibration`, a judge audit carries a loud `UNMEASURED` warning. Add `--min-agreement 90` to stop before the audit if the judge disagrees with you too often. `input` is optional, so labeled `--capture-misses` output works too.
+
+To tune a judge without running an audit:
+
+```bash
+pennywyze calibrate --prompt prompt.md --calibration labels.jsonl --judge-model claude-sonnet-5-5
+```
+
+A worked example lives in [`examples/freeform/`](examples/freeform/). Its labels are illustrative — write your own from real answers to your own prompt; agreement on someone else's labels says nothing about your task.
 
 ## Repeatability
 
@@ -170,6 +204,10 @@ If you hit one of these, the fix is usually immediate:
 | `Dataset file '...' is empty. Provide at least 1 test example.` | The file has no usable rows | Add at least one `{"input": ..., "expected": ...}` line |
 | `Error: Volume must be a positive number.` | `--volume` wasn't a number, or was ≤ 0 | Pass a positive number, e.g. `--volume 5000` |
 | `Error: Pass rate must be a number between 1 and 100.` | `--pass-rate` was outside 1–100 | Pass a percentage in that range |
+| `Unknown judge model '...'` | `--judge-model` or `PENNYWYZE_JUDGE_MODEL` isn't a model PennyWyze can price | Use one of the ids the message lists |
+| `Judge model '...' could not be confirmed with the Anthropic API` | Your key can't reach that model | Check the id and your key's access, or pick another judge |
+| `Line N of your calibration file is invalid: ...` | A label line is missing `answer` or `expected`, or `label` isn't `pass`/`fail` | Fix that line |
+| `Grader agreed with your labels N% of the time, below --min-agreement` | The judge disagrees with your hand grading too often to trust | Read the disagreements (`pennywyze calibrate`), try another `--judge-model`, or fix ambiguous labels |
 | `Error: Could not connect to Anthropic API. Check your network connection.` | A network or timeout failure reaching Anthropic | Check your connection and retry, or run with `--fake` to confirm the rest of the pipeline works |
 
 ## Contributing & Development
@@ -188,7 +226,7 @@ npm test                                                                        
 
 **Developing without an API key or cost:** add `--fake` to any command to run the full pipeline against a free, instant, built-in stand-in provider instead of the real Anthropic API. This is how the tool gets built and tested day to day — real API calls are only for real audits.
 
-**Extending PennyWyze:** the audit loop is built around two swappable contracts — `ModelProvider` (anything that can answer a question and report what it cost, see `src/providers/provider.ts`) and `Scorer` (anything that can grade an answer true or false, see `src/scorers/scorer.ts`). Most new features — a new model provider, a new grading strategy — are a single new file implementing one of these two interfaces, not a change to the core loop.
+**Extending PennyWyze:** the audit loop is built around two swappable contracts — `ModelProvider` (anything that can answer a question and report what it cost, see `src/providers/provider.ts`) and `Scorer` (anything that can grade an answer and say why, see `src/scorers/scorer.ts`). Most new features — a new model provider, a new grading strategy — are a single new file implementing one of these two interfaces, not a change to the core loop.
 
 Questions or Code of Conduct concerns: [pennywyzeosp@gmail.com](mailto:pennywyzeosp@gmail.com)
 
@@ -211,7 +249,7 @@ Questions or Code of Conduct concerns: [pennywyzeosp@gmail.com](mailto:pennywyze
 | Flexible dataset input formats (CSV, etc.) | 🙏🏻 |
 | `pennywyze init` — guided golden-dataset builder | 🙏🏻 |
 | Cross-provider audits — OpenAI, Google, and Grok, run in parallel per provider | 🙏🏻 |
-| LLM-as-judge — exact match runs first, the judge only sees the rest, and reports how often it agrees with your own grading | 🙏🏻 |
+| LLM-as-judge — exact match runs first, the judge only sees the rest, and reports how often it agrees with your own grading | ✅ |
 | Prompt trimming — cheaper prompts, not just cheaper models | 🙏🏻 |
 
 ✅ = Ready to use · ⏳ = In progress · 🙏🏻 = Looking for contributors

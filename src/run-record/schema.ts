@@ -20,6 +20,8 @@ export const missSchema = z.object({
   input: z.string(),
   answer: z.string(),
   expected: z.string(),
+  /** The judge's explanation, when the judge decided this miss. */
+  rationale: z.string().optional(),
 });
 
 export const modelResultSchema = z.object({
@@ -39,9 +41,38 @@ export const modelResultSchema = z.object({
 export const verdictSchema = z.object({
   recommended: z.string().nullable(),
   savingsPerMonth: z.number(),
+  /** Savings as a percentage of the baseline's cost. Absent in older records. */
+  savingsPercent: z.number().optional(),
   baseline: z.string().nullable(),
   baselineIsAssumed: z.boolean(),
   reason: z.enum(['cheaper_model_passes', 'nothing_passed', 'already_optimal']),
+});
+
+export const agreementSchema = z.object({
+  scored: z.number().int().nonnegative(),
+  agreed: z.number().int().nonnegative(),
+  rate: z.number().min(0).max(1).nullable(),
+  falsePasses: z.number().int().nonnegative(),
+  falseFails: z.number().int().nonnegative(),
+  unscored: z.number().int().nonnegative(),
+  disagreements: z.array(
+    z.object({
+      input: z.string(),
+      answer: z.string(),
+      expected: z.string(),
+      human: z.enum(['pass', 'fail']),
+      grader: z.enum(['pass', 'fail']),
+      rationale: z.string().nullable(),
+    }),
+  ),
+});
+
+export const earlyStopSchema = z.object({
+  callsMade: z.number().int().nonnegative(),
+  callsPossible: z.number().int().nonnegative(),
+  callsSkipped: z.number().int().nonnegative(),
+  savedUsd: z.number().nonnegative(),
+  savedFraction: z.number().min(0).max(1),
 });
 
 export const runRecordSchema = z.object({
@@ -69,6 +100,20 @@ export const runRecordSchema = z.object({
   verdict: verdictSchema,
   /** What this audit itself cost to run, in USD. */
   auditCostUsd: z.number().nonnegative(),
+
+  // Added after schema version 1 shipped. Optional, so records written
+  // before them still parse.
+  /** The judge model and where it was resolved from. Null for exact-match audits. */
+  judge: z
+    .object({ model: z.string(), source: z.enum(['flag', 'env', 'default']) })
+    .nullable()
+    .optional(),
+  /** The grader's agreement with hand labels. Null when none were given. */
+  graderAgreement: agreementSchema.nullable().optional(),
+  /** The part of auditCostUsd spent on judge calls. */
+  graderCostUsd: z.number().nonnegative().optional(),
+  /** What early stopping skipped and saved. */
+  earlyStop: earlyStopSchema.optional(),
 });
 
 export type RunRecord = z.infer<typeof runRecordSchema>;
