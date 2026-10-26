@@ -21,8 +21,17 @@ import {
 import { fakeProvider } from './providers/fake-provider.js';
 import { anthropicProvider } from './providers/anthropic-provider.js';
 import { ANTHROPIC_MODELS } from './providers/anthropic-models.js';
-import { calculateResultsCost, summarize } from './summarize.js';
-import { exactMatchScorer } from './scorers/exact-match-scorer.js';
+import {
+  calculateGraderCost,
+  calculateResultsCost,
+  costOfUsage,
+  summarize,
+  summarizeEarlyStopping,
+} from './summarize.js';
+import { buildGrader, pickGraderKind, type BuiltGrader } from './scorers/build-grader.js';
+import { loadLabels } from './calibration/load-labels.js';
+import { measureAgreement, type AgreementReport } from './calibration/agreement.js';
+import type { LabeledExample } from './calibration/schema.js';
 
 const program = new Command();
 
@@ -61,6 +70,29 @@ const saveMissFixtures = (misses: AuditResult[], filePath: string): void => {
   writeFileSync(filePath, allLines.join('\n') + '\n');
 };
 
+/** Parses --min-agreement into a 0–1 fraction, or null when it wasn't given. */
+const parseMinAgreement = (raw: string | undefined): number | null => {
+  if (raw === undefined) return null;
+  const value = Number(raw);
+  if (Number.isNaN(value) || value < 1 || value > 100) {
+    throw new Error('--min-agreement must be a number between 1 and 100.');
+  }
+  return value / 100;
+};
+
+const describeJudge = (grader: BuiltGrader): string =>
+  grader.judge
+    ? `${grader.judge.modelId}${grader.judge.displayName ? ` (${grader.judge.displayName})` : ''}, from ${
+        { flag: '--judge-model', env: 'PENNYWYZE_JUDGE_MODEL', default: 'the default' }[grader.judge.source]
+      }`
+    : 'exact match';
+
+/** One line summarizing a calibration run, for the progress area. */
+const agreementLine = (report: AgreementReport): string =>
+  report.rate === null
+    ? ` ! grader calibration — no label could be scored (${report.unscored} undecided)`
+    : ` ✓ grader calibrated — agreed with ${report.agreed}/${report.scored} labels (${Math.round(report.rate * 100)}%)`;
+
 // .version() belongs on the program itself — .command() returns the subcommand,
 // so chaining it after would attach --version to `audit` instead of `pennywyze`.
 program.name('pennywyze').version(version);
@@ -95,6 +127,22 @@ program
     '--json-out <filepath>',
     'also write the full run to this file as JSON, for CI or later comparison',
   )
+  .option(
+    '--grader <kind>',
+    "how answers are graded: 'exact' (default) or 'judge' (exact match first, an LLM judge for the rest)",
+  )
+  .option(
+    '--judge-model <model-id>',
+    'the judge model (implies --grader judge). Falls back to PENNYWYZE_JUDGE_MODEL, then claude-opus-5-5',
+  )
+  .option(
+    '--calibration <filepath>',
+    "hand-labeled answers (JSONL with answer, expected, label: 'pass'|'fail') — measures how often the grader agrees with you",
+  )
+  .option(
+    '--min-agreement <percentage>',
+    'stop before the audit if grader agreement with --calibration is below this, 1-100',
+  )
   .action(async options => {
     // Convert flags from text into numbers — everything typed in a terminal arrives as a string
     const volume = Number(options.volume);
@@ -119,11 +167,20 @@ program
     // Load dataset and provider cleanly inside an error-handling boundary
     let prompt: string
     let dataset: ReturnType<typeof loadGoldenDataset>
+    let labels: LabeledExample[] | null = null
+    let minAgreement: number | null
+    let graderKind: ReturnType<typeof pickGraderKind>
 
     try {
+      graderKind = pickGraderKind(options);
+      minAgreement = parseMinAgreement(options.minAgreement);
+      if (minAgreement !== null && !options.calibration) {
+        throw new Error('--min-agreement needs --calibration to measure against.');
+      }
       // Loaders throw descriptive errors for missing files, empty files, or invalid JSON lines
       prompt = loadPrompt(options.prompt);
       dataset = loadGoldenDataset(options.dataset);
+      if (options.calibration) labels = loadLabels(options.calibration);
     } catch (err:any) {
       // Intercept errors and print clean CLI messages without leaking Node stack traces
       return program.error(`Error: ${err.message}`)
@@ -136,6 +193,7 @@ program
         checkOutputPath(options.jsonOut, {
           prompt: options.prompt,
           dataset: options.dataset,
+          calibration: options.calibration,
         });
         prepareOutputPath(options.jsonOut);
       } catch (err) {
@@ -146,6 +204,43 @@ program
     }
 
     const provider = options.fake ? fakeProvider : anthropicProvider;
+
+    // Resolved now, before any paid call: an unreachable judge model should
+    // fail in a second, not after the first tier has been audited.
+    let grader: BuiltGrader
+    try {
+      grader = await buildGrader({
+        kind: graderKind,
+        judgeModel: options.judgeModel,
+        taskPrompt: prompt,
+        fake: Boolean(options.fake),
+      });
+    } catch (err) {
+      return program.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    if (grader.judge) console.log(` ℹ Judge: ${describeJudge(grader)}`);
+
+    // Calibration runs first, so a judge that disagrees with you can stop the
+    // run before the audit spends anything.
+    let agreement: AgreementReport | null = null
+    if (labels) {
+      try {
+        agreement = await measureAgreement(grader.scorer, labels);
+      } catch (err) {
+        return program.error(
+          `Error: Calibration failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      console.log(agreementLine(agreement));
+
+      if (minAgreement !== null && (agreement.rate ?? 0) < minAgreement) {
+        return program.error(
+          `Error: Grader agreed with your labels ${
+            agreement.rate === null ? 'on nothing' : `${Math.round(agreement.rate * 100)}% of the time`
+          }, below --min-agreement ${Math.round(minAgreement * 100)}%. Audit not run (calibration cost $${costOfUsage(agreement.usage).toFixed(2)}).`,
+        );
+      }
+    }
 
     // Captured before the first call so the record says when the audit began,
     // not when it finished writing.
@@ -174,7 +269,7 @@ program
         prompt,
         MODEL_IDS,
         passBar, // as a fraction — early stopping needs it to know if a model can still recover
-        exactMatchScorer,
+        grader.scorer,
         terminalProgress(),
       );
     } catch (err: any) {
@@ -204,7 +299,12 @@ program
       volume,
       passBar,
     );
-    const auditCost = calculateResultsCost(results);
+    // Judge spend counts toward what the audit cost, never toward a model's
+    // monthly projection: production traffic isn't graded.
+    const graderCost =
+      calculateGraderCost(results) + (agreement ? costOfUsage(agreement.usage) : 0);
+    const auditCost = calculateResultsCost(results) + graderCost;
+    const earlyStop = summarizeEarlyStopping(results, MODEL_IDS, dataset.length);
     if (options.captureMisses) {
       saveMissFixtures(
         results.filter(r => !r.pass),
@@ -222,7 +322,21 @@ program
       ...(currentModel ? ([currentModel] as const) : []),
     );
 
-    printReport(summaries, auditCost, dataset.length, verdict);
+    printReport(summaries, auditCost, dataset.length, verdict, {
+      grader: {
+        kind: grader.kind,
+        ...(grader.judge
+          ? {
+              judgeModel: grader.judge.modelId,
+              judgeSource: grader.judge.source,
+              judgeDecisions: results.filter(r => r.gradedBy === 'judge').length,
+            }
+          : {}),
+        agreement,
+      },
+      graderCost,
+      earlyStop,
+    });
 
     if (options.jsonOut) {
       try {
@@ -235,13 +349,17 @@ program
             dataset,
             passRate,
             volume,
-            // Hardcoded because exact-match is the only grader there is.
-            // Becomes the selected grader's name once there is a choice.
-            grader: 'exact',
+            grader: grader.scorer.name,
             currentModel,
             models: summaries,
             verdict,
             auditCostUsd: auditCost,
+            judge: grader.judge
+              ? { model: grader.judge.modelId, source: grader.judge.source }
+              : null,
+            agreement,
+            graderCostUsd: graderCost,
+            earlyStop,
           }),
         );
       } catch (err) {
@@ -254,6 +372,58 @@ program
         );
       }
     }
+  });
+
+program
+  .command('calibrate')
+  .description(
+    'Measure how often a grader agrees with your hand labels, without running an audit',
+  )
+  .requiredOption('--prompt <filepath>', 'the task prompt the graded answers were produced for')
+  .requiredOption(
+    '--calibration <filepath>',
+    "hand-labeled answers (JSONL with answer, expected, label: 'pass'|'fail')",
+  )
+  .option('--grader <kind>', "'judge' (default here) or 'exact'")
+  .option('--judge-model <model-id>', 'the judge model; falls back to PENNYWYZE_JUDGE_MODEL, then claude-opus-5-5')
+  .option('--fake', 'use the offline stand-in judge')
+  .action(async options => {
+    let prompt: string
+    let labels: LabeledExample[]
+    let grader: BuiltGrader
+    try {
+      prompt = loadPrompt(options.prompt);
+      labels = loadLabels(options.calibration);
+      grader = await buildGrader({
+        kind: pickGraderKind({ grader: options.grader ?? 'judge', judgeModel: options.judgeModel }),
+        judgeModel: options.judgeModel,
+        taskPrompt: prompt,
+        fake: Boolean(options.fake),
+      });
+    } catch (err) {
+      return program.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    console.log(` ℹ Grader: ${describeJudge(grader)}`);
+    let report: AgreementReport
+    try {
+      report = await measureAgreement(grader.scorer, labels);
+    } catch (err) {
+      return program.error(`Error: Calibration failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    console.log(agreementLine(report));
+    console.log(
+      `   ${report.falsePasses} false pass${report.falsePasses === 1 ? '' : 'es'} · ${report.falseFails} false fail${report.falseFails === 1 ? '' : 's'}${report.unscored ? ` · ${report.unscored} undecided` : ''}`,
+    );
+    for (const d of report.disagreements) {
+      console.log(`\n   you: ${d.human}, grader: ${d.grader}`);
+      if (d.input) console.log(`   Input:    ${JSON.stringify(d.input)}`);
+      console.log(`   Answer:   ${JSON.stringify(d.answer)}`);
+      console.log(`   Expected: ${JSON.stringify(d.expected)}`);
+      if (d.rationale) console.log(`   Judge:    ${d.rationale}`);
+    }
+    console.log(`\n ℹ Calibration cost: $${costOfUsage(report.usage).toFixed(2)}\n`);
   });
 
 // Everything above only describes the command — parse() reads what was typed and acts on it

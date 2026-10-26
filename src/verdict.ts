@@ -14,6 +14,8 @@ export type Verdict = {
   recommended: string | null;
   /** Dollars per month saved by switching. Zero unless a switch is recommended. */
   savingsPerMonth: number;
+  /** savingsPerMonth as a percentage of the baseline's monthly cost, 0–100. */
+  savingsPercent: number;
   /** The model savings were measured against. */
   baseline: string | null;
   /**
@@ -68,17 +70,21 @@ export const decideVerdict = (
   // cheapest passing model is not actually cheaper than the baseline. Both
   // are legitimate outcomes, not errors.
   if (!cheapest) {
-    return { ...base, recommended: null, savingsPerMonth: 0, reason: 'nothing_passed' };
+    return { ...base, recommended: null, savingsPerMonth: 0, savingsPercent: 0, reason: 'nothing_passed' };
   }
 
   if (savings <= 0) {
-    return { ...base, recommended: null, savingsPerMonth: 0, reason: 'already_optimal' };
+    return { ...base, recommended: null, savingsPerMonth: 0, savingsPercent: 0, reason: 'already_optimal' };
   }
 
   return {
     ...base,
     recommended: cheapest.name,
     savingsPerMonth: savings,
+    savingsPercent:
+      baselineModel && baselineModel.monthlyCost > 0
+        ? (savings / baselineModel.monthlyCost) * 100
+        : 0,
     reason: 'cheaper_model_passes',
   };
 };
