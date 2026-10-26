@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![npm](https://img.shields.io/badge/npm-pennywyze-CB3837.svg)](https://www.npmjs.com/package/pennywyze)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](#contributing--development)
-[![GitHub](https://img.shields.io/badge/GitHub-repo-181717.svg)](https://github.com/oslabs-beta/PennyWyze)
+[![GitHub](https://img.shields.io/badge/GitHub-repo-181717.svg)](https://github.com/Syntek-Collective/PennyWyze)
 
 [![TypeScript](https://img.shields.io/badge/TypeScript-007ACC?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Node.js](https://img.shields.io/badge/Node.js-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
@@ -179,7 +179,7 @@ Contributions are welcome — fork the repo, branch from `dev`, commit, and open
 Build from source instead of installing from npm:
 
 ```bash
-git clone https://github.com/oslabs-beta/PennyWyze.git
+git clone https://github.com/Syntek-Collective/PennyWyze.git
 cd PennyWyze
 npm install
 npm run dev -- audit --prompt examples/prompt.md --dataset examples/demo-dataset.jsonl   # run without building

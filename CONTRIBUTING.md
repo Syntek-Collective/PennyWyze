@@ -5,7 +5,7 @@ Thanks for considering a contribution. This project is built around a couple of 
 ## Development setup
 
 ```bash
-git clone https://github.com/oslabs-beta/PennyWyze.git
+git clone https://github.com/Syntek-Collective/PennyWyze.git
 cd PennyWyze
 npm install
 ```
