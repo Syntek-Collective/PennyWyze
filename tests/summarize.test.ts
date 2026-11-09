@@ -1,6 +1,11 @@
 import { describe, it, expect } from 'vitest';
 
-import { summarize, calculateResultsCost } from '../src/summarize.js';
+import {
+  summarize,
+  calculateResultsCost,
+  calculateGraderCost,
+  summarizeEarlyStopping,
+} from '../src/summarize.js';
 import type { AuditResult } from '../src/audit.js';
 import { ANTHROPIC_MODELS } from '../src/providers/anthropic-models.js';
 
@@ -194,5 +199,58 @@ describe('calculateResultsCost', () => {
     const total = calculateResultsCost([result({ modelId: 'not-a-model' })]);
 
     expect(total).toBe(0);
+  });
+});
+
+describe('judge cost', () => {
+  const judged = (overrides: Partial<AuditResult> = {}) =>
+    result({ graderUsage: { modelId: OPUS, inputTokens: 1_000_000, outputTokens: 0 }, ...overrides });
+
+  it('prices judge calls separately from the model calls', () => {
+    // 1M Opus input tokens = $4.
+    expect(calculateGraderCost([judged(), result()])).toBeCloseTo(4);
+  });
+
+  it('never folds judge cost into a model\'s monthly projection', () => {
+    const withJudge = summarize([judged()], [HAIKU], 1, 1000, 1);
+    const without = summarize([result()], [HAIKU], 1, 1000, 1);
+
+    expect(withJudge[0]?.monthlyCost).toBe(without[0]?.monthlyCost);
+  });
+
+  it('carries the judge rationale onto the miss', () => {
+    const rows = summarize(
+      [result({ pass: false, answer: 'technical', rationale: 'Wrong category.' })],
+      [HAIKU],
+      1,
+      1000,
+      1,
+    );
+
+    expect(rows[0]?.misses[0]?.rationale).toBe('Wrong category.');
+  });
+});
+
+describe('summarizeEarlyStopping', () => {
+  it('counts calls skipped by models that could no longer pass, and what they would have cost', () => {
+    // Haiku stopped after 2 of 10; Opus ran all 10.
+    const results = [
+      ...Array.from({ length: 2 }, () => result({ modelId: HAIKU, pass: false })),
+      ...Array.from({ length: 10 }, () => result({ modelId: OPUS })),
+    ];
+
+    const savings = summarizeEarlyStopping(results, [OPUS, HAIKU], 10);
+
+    expect(savings).toMatchObject({ callsMade: 12, callsPossible: 20, callsSkipped: 8 });
+    const haikuPerCall = calculateResultsCost(results.slice(0, 1));
+    expect(savings.savedUsd).toBeCloseTo(8 * haikuPerCall);
+    expect(savings.savedFraction).toBeGreaterThan(0);
+    expect(savings.savedFraction).toBeLessThan(1);
+  });
+
+  it('does not count a model cut short by a failed call as a saving', () => {
+    const results = [result({ status: 'incomplete', inputTokens: 0, outputTokens: 0 })];
+
+    expect(summarizeEarlyStopping(results, [HAIKU], 10).callsSkipped).toBe(0);
   });
 });

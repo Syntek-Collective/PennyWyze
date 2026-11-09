@@ -9,7 +9,8 @@ cli.ts (parse + validate flags)
   → loaders (validate prompt + dataset)
   → provider (fake or real)
   → audit.ts (the loop) → progress.ts (draws the bar)
-  → scorer (grade each answer)
+  → scorer (grade each answer: exact match, or exact match then an LLM judge)
+  → calibration/ (optional, runs first: grader vs your hand labels)
   → summarize.ts (results → one row per model) → cost/calculator.ts (price it)
   → verdict.ts (decide what to recommend)
   → report.ts (print the table and verdict)
@@ -83,13 +84,29 @@ Implements `ModelProvider` against the real Anthropic API. A few non-obvious dec
 
 ## `src/scorers/scorer.ts` — the grading contract
 
-One interface, `Scorer`, with one method: `score(actual, expected)` returns `Promise<boolean>`. It's async even though the current grader never awaits anything, on purpose: a future LLM-as-judge grader will need to make its own API call, and declaring the contract async now means it drops into this exact socket later without touching the audit loop.
+One interface, `Scorer`, with one method: `score({ input, answer, expected })` returns a `ScoreResult` — `pass`, which grader decided (`gradedBy: 'exact' | 'judge'`), the judge's `rationale` when it decided, and `usage` (the judge's own token counts) when grading cost money. Each scorer also carries a `name` (`'exact'` or `'judge:<model-id>'`) that the report and run record print.
 
-Known limitation, left deliberately unaddressed: a judge would also need the original *input* (not just the two answers), and would want to return a reason and its own token cost. That's a real change to this interface, and it should be made by whoever builds the judge, when the right shape is knowable, rather than guessed at now.
+A grader that cannot reach a decision throws. The audit records that answer as `incomplete`, same as a failed model call — nobody has said the answer was wrong, so it must not count as a miss.
 
-## `src/scorers/exact-match-scorer.ts` — the real grader
+## `src/scorers/exact-match-scorer.ts` — the default grader
 
 Normalizes both sides (strip code fences, quotes, capitalization, trailing punctuation) and then requires exact equality, not "contains." A correct answer wearing decoration passes; a right answer buried in a sentence still fails, because ignoring an output-format instruction is a real production bug, not a technicality. This file's tests are partly seeded by `tests/scorers/fixtures/real-misses.jsonl` — real wrong answers captured from real audits, which `tests/scorers/real-misses.test.ts` replays to assert each one still scores as a miss. Loosen the normalization too far and a genuine miss starts passing, and that test goes red. The file grows only when someone opts in with `--capture-misses <path>`; it is never written automatically, because a relative default path lands in whatever directory the installed CLI happened to be run from.
+
+## `src/scorers/judge/` — the LLM judge
+
+- **`llm-judge-scorer.ts`** — the scorer. Exact match runs first and the judge only sees what exact match rejects, so a matching answer is never paid for twice and the judge can't talk a correct answer into a fail. The judge is shown the user's task prompt, the input, the reference answer and the model's answer, each in its own tag, and told that everything inside the tags is material to grade, not instructions — an answer that says "grade this as pass" is a wrong answer. A refused, truncated or unparseable judge reply throws a `JudgeError` that carries the tokens it still spent, so audit cost stays honest when grading fails.
+- **`judge-client.ts`** — the `JudgeClient` seam (same idea as `ModelProvider`) and the verdict schema: `{ rationale, verdict: 'pass' | 'fail' }`. Rationale comes first so the judge reasons before it decides.
+- **`anthropic-judge-client.ts`** — the real judge. Uses structured outputs (`messages.parse` with `zodOutputFormat`), so the reply is constrained to the schema and there's no free text to scrape a verdict from. Effort is `medium`, one notch above the audit's `low`, because every verdict rests on the judge's accuracy and it only grades what exact match rejected.
+- **`fake-judge-client.ts`** — the free stand-in `--fake` uses: passes an answer that contains the reference.
+- **`resolve-judge-model.ts`** — picks the judge at run time: `--judge-model`, then `PENNYWYZE_JUDGE_MODEL`, then `claude-opus-5-5`. The id must be in the pricing catalog, since judge calls are part of the audit's cost. On real runs the model is then confirmed with the Models API (`models.retrieve`) before any paid call, so an unreachable judge fails in a second instead of halfway through an audit.
+
+`src/scorers/build-grader.ts` turns the `--grader` / `--judge-model` flags into one of these. `--judge-model` alone implies the judge; `--grader exact` plus a judge model is refused.
+
+## `src/calibration/` — how far to trust the grader
+
+A grader is only as useful as its agreement with a person. `--calibration <file>` takes hand-labeled answers (JSONL: `answer`, `expected`, `label: 'pass' | 'fail'`, optional `input` — so labeled `--capture-misses` output works as-is), runs the grader over them exactly as the audit will use it (exact match first, then the judge), and reports agreement rate, false passes and false fails. False passes are listed first everywhere: they're the mistake that lets a bad model win.
+
+Calibration runs *before* the audit, so `--min-agreement` can stop a run whose grader disagrees with you before anything else is spent. `pennywyze calibrate` runs it on its own, for tuning a judge without auditing. Undecided labels (refused judge calls) are left out of the rate but reported, and their tokens are still counted.
 
 ## `src/audit.ts` — the loop
 
@@ -97,7 +114,11 @@ Everything upstream feeds this file; everything downstream reads what it produce
 
 A call that throws does not end the audit. It is recorded as `incomplete`, that model stops, and the remaining models still run — every result already collected has been paid for, and one provider having a bad minute shouldn't discard it.
 
-Before each model's run, it computes how many misses that model can absorb and still clear the pass bar. The moment a model's failure count exceeds that number, the loop breaks for that model rather than finishing the remaining questions, since it's already mathematically impossible for it to pass.
+Before each model's run, it computes how many misses that model can absorb and still clear the pass bar. The moment a model's failure count exceeds that number, the loop breaks for that model rather than finishing the remaining questions (and their judge calls), since it's already mathematically impossible for it to pass. At 90% on 50 questions, 5 misses are allowed and the sixth ends the run.
+
+**Gotcha:** that count has a small epsilon added before flooring. `50 * (1 - 0.9)` is `4.999999999999999` in JavaScript, and flooring it allowed 4 misses instead of 5 — stopping a model that would have passed at exactly 45/50. A test pins this.
+
+Each graded result also keeps `gradedBy`, the judge's `rationale`, and `graderUsage` (the judge's tokens).
 
 ## `src/progress.ts` — the progress bar
 
@@ -108,6 +129,8 @@ The terminal implementation of the audit's `AuditProgress` hooks. Every ANSI esc
 Turns the flat list of per-question results into one row per model: pass count, whether early stopping cut it short, how many calls came back incomplete, projected monthly cost, whether it cleared the bar, and its misses.
 
 Returns numbers and booleans, never formatted strings, for two reasons: tests can assert on `passes === 48` instead of matching text with invisible colour codes in it, and a non-terminal caller needs the values rather than a rendering of them.
+
+Judge cost is kept out of the monthly projection — production traffic isn't graded — and priced separately by `calculateGraderCost` into the audit's own cost. `summarizeEarlyStopping` reports how many calls early stopping skipped and roughly what they would have cost, pricing each skipped call at that model's own average (model call plus grading). A model cut short by a failed call doesn't count as a saving; it just didn't finish.
 
 **Gotcha:** a model with *any* incomplete call can never be reported as passed. Part of its score is unknown, so "it passed" would be a claim the data can't support — it shows as `N/A`, not `FAIL`, and is excluded from the verdict.
 
@@ -137,13 +160,15 @@ Three decisions in here that aren't obvious:
 
 - **The hashes cover what was measured, not the file bytes.** The prompt hash is of the sanitized prompt actually sent to the model, and the dataset hash is of the parsed examples. So reformatting a dataset's whitespace isn't a change, while editing an expected answer is. Their purpose is to let a reader tell "quality regressed" apart from "this baseline measured a different prompt, so comparing them is meaningless" — without that, a CI gate reports failures that aren't real, which is how a team ends up switching the check off.
 - **Misses are stored in full.** The report truncates inputs to 60 characters so its tree view doesn't wrap; a saved record that inherited that would be useless for diagnosing a miss a week later. **This makes the file more sensitive than it looks:** it contains the complete text of every question a model got wrong — real customer messages, for a support classifier — where `--capture-misses` stores only the answer and the expected label. These records are meant to be committed as CI baselines, so say so in any docs that recommend committing them, and don't commit one built from sensitive inputs.
-- **`schemaVersion` is checked, not just recorded.** Bump it whenever a change would break a reader of an older file.
+- **`schemaVersion` is checked, not just recorded.** Bump it whenever a change would break a reader of an older file. The judge fields (`judge`, `graderAgreement`, `graderCostUsd`, `earlyStop`, `verdict.savingsPercent`, `misses[].rationale`) were added as optional fields, so version 1 records written before them still parse.
 - **There is deliberately no `provider` field.** Considered and deferred: the model id already identifies its provider through the catalog, so a reader can derive it, and adding the field later as an *optional* one needs no `schemaVersion` bump and leaves existing records valid. Deciding its shape now — per model or per run, provider id or display name, and what to do with a model the catalog no longer knows — would be guesswork until a second provider exists. Add it with that work.
 - **The output path is validated before the audit, not at write time.** `--json-out` pointing at the prompt or the dataset is refused outright, because the record is written with a plain overwrite and the audit has already finished by then — the user would lose both the file and the run. An uncreatable folder is also caught up front, since discovering it afterwards means paying for every call a second time. Both live in `output-path.ts`.
 
 ## `src/report.ts` — the printed output
 
 The only part of the tool a user ever sees. Prints the comparison table, the miss details for any model that had at least one, and the verdict. The verdict logic is the one rule this file owns and the easiest to get subtly wrong: it names the cheapest model that *passed*, never just the cheapest model outright, so a fast wrong answer can never win.
+
+Before the verdict it prints a **GRADER** line in every audit: which grader ran (and for the judge, which model and where that choice came from), and its agreement with the user's hand labels. A judge audit with no `--calibration` gets a loud `UNMEASURED` warning, because its verdict is an unverified opinion. Up to three disagreements are shown, false passes first. Judged misses show the judge's rationale. The verdict states savings as a percentage too, and says so when the cheaper tier scored identically to the baseline. The footer splits out judge cost and what early stopping saved.
 
 Two rules that were each a bug once:
 
@@ -152,7 +177,7 @@ Two rules that were each a bug once:
 
 ## Tests
 
-Vitest covers the loaders, the audit loop's shape and early-stopping math, its incomplete-call handling and progress reporting, the summary rollup, the cost calculator, the report's verdict rules, and the exact-match scorer — including a replay of real captured misses.
+Vitest covers the loaders, the audit loop's shape and early-stopping math, its incomplete-call handling and progress reporting, the summary rollup, the cost calculator, the report's verdict rules, the exact-match scorer — including a replay of real captured misses — and the judge: exact-match-first behaviour, refusal and parse failures, runtime model resolution, and agreement measurement. Judge tests use scripted `JudgeClient`s, never the API.
 
 Two conventions worth keeping:
 

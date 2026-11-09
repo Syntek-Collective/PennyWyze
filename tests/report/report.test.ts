@@ -102,7 +102,7 @@ describe('printReport', () => {
 
     const output = printedOutput()
     // 300 - 100, not 900 - 100: the user never paid the 900.
-    expect(output).toContain('save ~$200.00/mo vs what-we-run-today')
+    expect(output).toContain('save ~$200.00/mo (67%) vs what-we-run-today')
   })
 
   it('says nothing beats what the user already runs, when that is true', () => {
@@ -142,4 +142,102 @@ describe('printReport', () => {
 
     expect(printedOutput()).not.toContain('Small dataset')
   })
+
+  it('states savings as a percentage of the baseline', () => {
+    const models = [
+      baseModel({ name: 'pricey', monthlyCost: 200 }),
+      baseModel({ name: 'cheap', monthlyCost: 28 }),
+    ]
+
+    printReport(models, 0.15, 50, decideVerdict(models))
+
+    expect(printedOutput()).toContain('save ~$172.00/mo (86%)')
+  })
+
+  it('calls out a cheaper tier that scored identically', () => {
+    const models = [
+      baseModel({ name: 'pricey', monthlyCost: 200, passes: 49 }),
+      baseModel({ name: 'cheap', monthlyCost: 28, passes: 49 }),
+    ]
+
+    printReport(models, 0.15, 50, decideVerdict(models))
+
+    expect(printedOutput()).toContain('Scores identically to pricey (49/50) at 86% lower cost')
+  })
+
+  it('does not claim identical scores when they differ', () => {
+    const models = [
+      baseModel({ name: 'pricey', monthlyCost: 200, passes: 50 }),
+      baseModel({ name: 'cheap', monthlyCost: 28, passes: 48 }),
+    ]
+
+    printReport(models, 0.15, 50, decideVerdict(models))
+
+    expect(printedOutput()).not.toContain('Scores identically')
+  })
+
+  it('warns loudly when a judge graded the audit with no measured agreement', () => {
+    printReport([baseModel()], 0.15, 50, decideVerdict([baseModel()]), {
+      grader: { kind: 'judge', judgeModel: 'claude-opus-5-5', judgeSource: 'default', judgeDecisions: 4, agreement: null },
+    })
+
+    const output = printedOutput()
+    expect(output).toContain('LLM judge (claude-opus-5-5, default)')
+    expect(output).toContain('decided 4 answers')
+    expect(output).toContain('Judge agreement: UNMEASURED')
+  })
+
+  it('prints the grader agreement rate before the verdict', () => {
+    printReport([baseModel()], 0.15, 50, decideVerdict([baseModel()]), {
+      grader: {
+        kind: 'judge',
+        judgeModel: 'claude-opus-5-5',
+        judgeSource: 'flag',
+        agreement: {
+          grader: 'judge:claude-opus-5-5',
+          scored: 50,
+          agreed: 47,
+          rate: 0.94,
+          falsePasses: 2,
+          falseFails: 1,
+          unscored: 0,
+          disagreements: [
+            { input: '', answer: 'Probably billing?', expected: 'technical', human: 'fail', grader: 'pass', rationale: 'Close enough.' },
+          ],
+          usage: [],
+        },
+      },
+    })
+
+    const output = printedOutput()
+    expect(output).toContain('Agreement with your labels: 47/50 (94%)')
+    expect(output).toContain('2 false passes · 1 false fail')
+    expect(output).toContain('you: fail, grader: pass')
+    expect(output.indexOf('Agreement with your labels')).toBeLessThan(output.indexOf('VERDICT'))
+  })
+
+  it("shows the judge's rationale under a miss", () => {
+    const models = [
+      baseModel({
+        passed: false,
+        misses: [{ input: 'q', answer: 'technical', expected: 'billing', rationale: 'Wrong category.' }],
+      }),
+    ]
+
+    printReport(models, 0.15, 50, decideVerdict(models))
+
+    expect(printedOutput()).toContain('Judge:    Wrong category.')
+  })
+
+  it('reports judge cost and what early stopping saved', () => {
+    printReport([baseModel()], 0.5, 50, decideVerdict([baseModel()]), {
+      graderCost: 0.12,
+      earlyStop: { callsMade: 58, callsPossible: 200, callsSkipped: 142, savedUsd: 0.75, savedFraction: 0.6 },
+    })
+
+    const output = printedOutput()
+    expect(output).toContain('(judge: $0.12)')
+    expect(output).toContain('Early stopping skipped 142 of 200 calls — saved ~$0.75 (60% of a full run)')
+  })
 })
+

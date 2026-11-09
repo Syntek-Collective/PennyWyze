@@ -13,9 +13,15 @@ import { dirname, resolve } from 'path';
  */
 export const checkOutputPath = (
   jsonOut: string,
-  inputs: { prompt: string; dataset: string },
+  inputs: { prompt: string; dataset: string; calibration?: string | undefined },
 ): void => {
   const target = resolve(jsonOut);
+
+  if (inputs.calibration && target === resolve(inputs.calibration)) {
+    throw new Error(
+      `--json-out would overwrite your calibration file ('${jsonOut}'). Choose a different path.`,
+    );
+  }
 
   if (target === resolve(inputs.prompt)) {
     throw new Error(

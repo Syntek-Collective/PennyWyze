@@ -1,0 +1,10 @@
+{"input": "I got my shoes 3 weeks ago and they don't fit. Can I send them back?", "expected": "Yes — returns are accepted within 30 days of delivery for a full refund, as long as the shoes are unused and in their original packaging."}
+{"input": "Can I return a gift card I never used?", "expected": "No — gift cards cannot be returned."}
+{"input": "I bought a jacket on sale. Can I get my money back?", "expected": "Sale items can be returned for store credit only, not a refund."}
+{"input": "My order was $35. Do I have to pay for return shipping?", "expected": "Yes — orders under $50 have a $6 return label fee deducted from the refund."}
+{"input": "How long until I see my refund?", "expected": "Refunds go back to your original payment method within 5–7 business days after the return arrives."}
+{"input": "It's been 45 days since delivery. Can I still return my lamp?", "expected": "No — returns must be made within 30 days of delivery."}
+{"input": "Can I return a mug with my name engraved on it?", "expected": "No — personalized items cannot be returned."}
+{"input": "I wore the sweater once. Can I return it?", "expected": "No — items must be unused to be returned."}
+{"input": "Do you price-match other stores?", "expected": "The return policy doesn't cover price matching."}
+{"input": "My $80 order arrived yesterday and I changed my mind. What happens if I return it?", "expected": "You can return it within 30 days for a full refund, with free return shipping since the order is over $50."}

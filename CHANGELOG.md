@@ -5,6 +5,14 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- LLM judge for free-form answers (`--grader judge`). Exact match runs first; the judge only grades what it rejects, and returns a structured verdict with a rationale, printed under each miss. Judge calls are priced from real token usage into the audit cost, never into monthly projections
+- The judge model is resolved at run time — `--judge-model`, then `PENNYWYZE_JUDGE_MODEL`, then `claude-opus-5-5` — and confirmed with the Anthropic Models API before any paid call
+- `--calibration <filepath>`: hand-labeled answers the grader is checked against before the audit. Every audit now prints a GRADER line with the agreement rate, false passes and false fails; a judge audit without calibration is flagged `UNMEASURED`
+- `--min-agreement <percent>`: stop before the audit if the grader disagrees with your labels too often
+- `pennywyze calibrate`: measure a grader's agreement with your labels without running an audit
+- The report now states savings as a percentage, notes when the cheaper tier scored identically to the baseline, and shows how many calls early stopping skipped and roughly what that saved
+- `--json-out` records gain `judge`, `graderAgreement`, `graderCostUsd`, `earlyStop`, `verdict.savingsPercent` and `misses[].rationale` — all optional, so older records still parse
+- `examples/freeform/`: a free-form prompt, dataset and label file for trying the judge
 - Claude Fable 5.1 as a fourth tier ($10/$50 per million tokens), so the audit covers the current flagship rather than stopping below it
 - `--json-out <filepath>`: writes the full audit to a JSON file alongside the usual table — every model's score and cost, the verdict as data, the settings used, and sha256 fingerprints of the prompt and dataset so a saved run can be compared to a later one meaningfully. The path is validated before the audit runs, and refused if it points at your prompt or dataset. Note the file contains the full text of every missed question
 - `--current <model-id>`: names the model you run today, so savings are measured against what you actually pay instead of the most expensive tier audited
@@ -12,6 +20,7 @@ All notable changes to this project are documented in this file.
 - Prettier config and `format` / `format:check` scripts
 
 ### Fixed
+- Early stopping allowed one miss too few at some pass rates because of floating-point error: at 90% on 50 questions it stopped a model on its 5th miss, so a model that would have finished at exactly 45/50 — a pass — was cut off and failed. It now allows 5 and stops on the 6th
 - When no model met the pass bar, the verdict claimed "You are currently on the optimal pricing tier" — which isn't true if nothing worked. That case now reads "No model met your pass bar", with a pointer to the misses or a lower `--pass-rate`. The two findings were indistinguishable before the verdict carried a reason
 - A failed API call no longer discards the whole audit. The failure is recorded, that model stops, and the remaining models finish
 - A truncated or declined response is no longer graded as a wrong answer. Providers report `stop_reason`, and anything other than `end_turn` is recorded as incomplete and excluded from scores, misses and cost
@@ -22,6 +31,7 @@ All notable changes to this project are documented in this file.
 - `README.md` and `docs/ARCHITECTURE.md` corrected where they described behaviour the code no longer has
 
 ### Changed
+- Breaking for contributors: `Scorer.score` now takes `{ input, answer, expected }` and returns `{ pass, gradedBy, rationale?, usage? }` instead of a boolean, and each scorer has a `name`. The plain boolean check is `exactMatch(answer, expected)`
 - Model lineup moved to the current generation: Opus 5 → **Opus 5.5** ($5/$25 → $4/$20) and Sonnet 5 → **Sonnet 5.5**. Opus 5 and Sonnet 5 are now legacy models, and Opus 5.5 is both newer and 20% cheaper than the tier we were previously pricing
 - Breaking: `--current` no longer accepts `claude-opus-5` or `claude-sonnet-5`. Use `claude-opus-5-5` or `claude-sonnet-5-5`
 - Node 20 or newer is required (18 is end-of-life)
@@ -36,10 +46,12 @@ All notable changes to this project are documented in this file.
 - `--version` flag, read from `package.json` so it always matches the published release
 
 ### Fixed
+- Early stopping allowed one miss too few at some pass rates because of floating-point error: at 90% on 50 questions it stopped a model on its 5th miss, so a model that would have finished at exactly 45/50 — a pass — was cut off and failed. It now allows 5 and stops on the 6th
 - Audits no longer write a `tests/scorers/fixtures/` directory into the current working directory. Capture is off unless `--capture-misses` is passed
 - Verdict no longer says "Switch to <model> - save ~$0.00/mo" when the only passing model is also the most expensive one. That case now reports that you are already on the optimal tier
 
 ### Changed
+- Breaking for contributors: `Scorer.score` now takes `{ input, answer, expected }` and returns `{ pass, gradedBy, rationale?, usage? }` instead of a boolean, and each scorer has a `name`. The plain boolean check is `exactMatch(answer, expected)`
 - Published package contains only the built CLI (4 files, ~10 kB, down from 43 files and ~272 kB)
 
 ## [1.0.0] - 9/22/26

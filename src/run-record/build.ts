@@ -1,7 +1,8 @@
 import { createHash } from 'crypto';
 
 import type { GoldenExample } from '../golden-dataset/schema.js';
-import type { ModelSummary } from '../summarize.js';
+import type { EarlyStopSavings, ModelSummary } from '../summarize.js';
+import type { AgreementReport } from '../calibration/agreement.js';
 import type { Verdict } from '../verdict.js';
 import {
   RUN_RECORD_SCHEMA_VERSION,
@@ -43,6 +44,10 @@ export type BuildRunRecordInput = {
   models: ModelSummary[];
   verdict: Verdict;
   auditCostUsd: number;
+  judge?: { model: string; source: 'flag' | 'env' | 'default' } | null;
+  agreement?: AgreementReport | null;
+  graderCostUsd?: number;
+  earlyStop?: EarlyStopSavings;
 };
 
 /**
@@ -82,4 +87,20 @@ export const buildRunRecord = (input: BuildRunRecordInput): RunRecord =>
     })),
     verdict: input.verdict,
     auditCostUsd: input.auditCostUsd,
+
+    judge: input.judge ?? null,
+    // The per-call usage list is cost bookkeeping, already in graderCostUsd.
+    graderAgreement: input.agreement
+      ? {
+          scored: input.agreement.scored,
+          agreed: input.agreement.agreed,
+          rate: input.agreement.rate,
+          falsePasses: input.agreement.falsePasses,
+          falseFails: input.agreement.falseFails,
+          unscored: input.agreement.unscored,
+          disagreements: input.agreement.disagreements,
+        }
+      : null,
+    graderCostUsd: input.graderCostUsd ?? 0,
+    earlyStop: input.earlyStop,
   });

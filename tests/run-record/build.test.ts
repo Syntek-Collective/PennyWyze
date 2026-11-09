@@ -41,6 +41,7 @@ const input = (
   verdict: {
     recommended: 'claude-haiku-4-5',
     savingsPerMonth: 100,
+    savingsPercent: 50,
     baseline: 'claude-opus-5-5',
     baselineIsAssumed: true,
     reason: 'cheaper_model_passes',
@@ -153,4 +154,44 @@ describe('buildRunRecord', () => {
       buildRunRecord({ ...input(), models: [{ name: 'x' }] }),
     ).toThrow();
   });
+
+  it('records the judge, its agreement and early-stop savings', () => {
+    const record = buildRunRecord(
+      input({
+        grader: 'judge:claude-opus-5-5',
+        judge: { model: 'claude-opus-5-5', source: 'env' },
+        agreement: {
+          grader: 'judge:claude-opus-5-5',
+          scored: 10,
+          agreed: 9,
+          rate: 0.9,
+          falsePasses: 1,
+          falseFails: 0,
+          unscored: 0,
+          disagreements: [],
+          usage: [{ modelId: 'claude-opus-5-5', inputTokens: 1, outputTokens: 1 }],
+        },
+        graderCostUsd: 0.05,
+        earlyStop: { callsMade: 8, callsPossible: 50, callsSkipped: 42, savedUsd: 0.2, savedFraction: 0.6 },
+      }),
+    );
+
+    expect(record).toMatchObject({
+      grader: 'judge:claude-opus-5-5',
+      judge: { model: 'claude-opus-5-5', source: 'env' },
+      graderAgreement: { rate: 0.9, falsePasses: 1 },
+      graderCostUsd: 0.05,
+      earlyStop: { callsSkipped: 42 },
+    });
+    // Per-call bookkeeping stays out of the saved file.
+    expect(record.graderAgreement).not.toHaveProperty('usage');
+  });
+
+  it('still reads a record written before the judge fields existed', () => {
+    const { judge, graderAgreement, graderCostUsd, earlyStop, ...older } = buildRunRecord(input());
+    const { savingsPercent, ...olderVerdict } = older.verdict;
+
+    expect(() => runRecordSchema.parse({ ...older, verdict: olderVerdict })).not.toThrow();
+  });
 });
+
